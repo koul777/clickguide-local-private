@@ -49,7 +49,7 @@ async function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {
 async function ensureRecorderInjected(tabId: number): Promise<void> {
   try {
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       files: ["assets/recorder.js"]
     });
   } catch {

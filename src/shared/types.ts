@@ -1,6 +1,6 @@
 export type SessionStatus = "recording" | "paused" | "completed";
 
-export type EventType = "click";
+export type EventType = "click" | "pointerdown";
 
 export type CaptureSession = {
   id: string;
