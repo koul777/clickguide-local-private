@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "ClickGuide Local",
+  "description": "Record browser clicks and turn them into local step-by-step guides.",
+  "version": "0.1.0",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ClickGuide Local"
+  },
+  "background": {
+    "service_worker": "assets/service-worker.js",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["assets/recorder.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["guide-editor.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
