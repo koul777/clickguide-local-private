@@ -11,7 +11,7 @@ import {
   patchStep,
   updateSessionTitle
 } from "../shared/db";
-import { generateGuideHtml, makeExportFileName } from "../shared/exportHtml";
+import { generateGuidePdfBlob, makePdfFileName } from "../shared/exportPdf";
 import {
   canvasPointToStepPoint,
   drawMarkerOnContext,
@@ -203,8 +203,7 @@ function getSessionIdFromUrl(): string | undefined {
   return params.get("sessionId") ?? undefined;
 }
 
-function downloadHtml(filename: string, html: string): void {
-  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -212,7 +211,7 @@ function downloadHtml(filename: string, html: string): void {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function GuideEditor(): React.ReactElement {
@@ -285,6 +284,14 @@ function GuideEditor(): React.ReactElement {
     void patchStep(selectedStep.id, { note: value });
   };
 
+  const handleStepTitleChange = (value: string): void => {
+    if (!selectedStep) {
+      return;
+    }
+    updateStepLocal(selectedStep.id, { title: value });
+    void patchStep(selectedStep.id, { title: value });
+  };
+
   const handleDeleteStep = async (stepId: string): Promise<void> => {
     if (!session) {
       return;
@@ -314,10 +321,10 @@ function GuideEditor(): React.ReactElement {
     setExporting(true);
     setError("");
     try {
-      const html = await generateGuideHtml(session, steps, screenshots);
-      downloadHtml(makeExportFileName(session.title), html);
+      const pdf = await generateGuidePdfBlob(session, steps, screenshots);
+      downloadBlob(makePdfFileName(session.title), pdf);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "HTML export에 실패했습니다.");
+      setError(err instanceof Error ? err.message : "PDF 파일 저장에 실패했습니다.");
     } finally {
       setExporting(false);
     }
@@ -363,7 +370,7 @@ function GuideEditor(): React.ReactElement {
             {steps.length}개 단계
           </span>
           <Button intent="primary" disabled={exporting || steps.length === 0} onClick={handleExport}>
-            {exporting ? "내보내는 중" : "HTML export"}
+            {exporting ? "PDF 준비 중" : "PDF 저장"}
           </Button>
         </div>
       </header>
@@ -457,6 +464,16 @@ function GuideEditor(): React.ReactElement {
 
           {selectedStep ? (
             <div className="space-y-5 p-4">
+              <label className="block">
+                <span className="mb-2 block text-xs font-semibold text-slate-600">단계 제목</span>
+                <input
+                  value={selectedStep.title ?? selectedStep.targetText}
+                  onChange={(event) => handleStepTitleChange(event.target.value)}
+                  placeholder={getStepLabel(selectedStep)}
+                  className="focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-sm leading-6"
+                />
+              </label>
+
               <label className="block">
                 <span className="mb-2 block text-xs font-semibold text-slate-600">단계 설명</span>
                 <textarea

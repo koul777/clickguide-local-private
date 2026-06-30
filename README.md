@@ -7,7 +7,7 @@ ClickGuide Local is a local Chrome Extension MVP that records browser clicks, ca
 - Records click coordinates, URL, page title, viewport size, and target text.
 - Captures a screenshot at each click.
 - Shows a numbered red marker on the clicked point.
-- Lets users edit notes, delete steps, reorder steps, and export an offline HTML guide.
+- Lets users edit notes, delete steps, reorder steps, and save the guide as a PDF.
 - Stores data locally in IndexedDB.
 
 No AI, LLM, RAG, GPT API, login, or external server is used.

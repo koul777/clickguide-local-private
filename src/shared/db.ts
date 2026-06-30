@@ -6,7 +6,7 @@ import type {
   SessionStatus,
   StepPatch
 } from "./types";
-import { cleanTargetText } from "./stepText";
+import { cleanStepTitle, cleanTargetText } from "./stepText";
 
 const DB_NAME = "clickguide-local";
 const DB_VERSION = 1;
@@ -89,7 +89,7 @@ export async function createSession(title?: string): Promise<CaptureSession> {
   const session: CaptureSession = {
     id: createId("session"),
     status: "recording",
-    title: title || `ClickGuide ${new Date(now).toLocaleString()}`,
+    title: title || "ClickGuide",
     startedAt: now,
     updatedAt: now
   };
@@ -213,6 +213,7 @@ export async function addRecordedStep(
     eventType: payload.eventType,
     url: payload.url,
     pageTitle: payload.pageTitle,
+    title: cleanStepTitle(payload.targetText),
     targetText: cleanTargetText(payload.targetText),
     x: Math.round(payload.x),
     y: Math.round(payload.y),
@@ -285,7 +286,8 @@ export async function patchStep(stepId: string, patch: StepPatch): Promise<Guide
   const next: GuideStep = {
     ...step,
     ...patch,
-    targetText: patch.targetText === undefined ? step.targetText : cleanTargetText(patch.targetText)
+    targetText: patch.targetText === undefined ? step.targetText : cleanTargetText(patch.targetText),
+    title: patch.title === undefined ? step.title : cleanStepTitle(patch.title)
   };
   stepStore.put(next);
 

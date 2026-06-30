@@ -4,9 +4,16 @@ export function cleanTargetText(value: string | undefined | null): string {
   return (value ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
+export function cleanStepTitle(value: string | undefined | null): string {
+  return cleanTargetText(value);
+}
+
+export function getStepTitle(step: Pick<GuideStep, "orderIndex" | "targetText" | "title">): string {
+  return cleanStepTitle(step.title) || cleanTargetText(step.targetText) || `${step.orderIndex + 1}단계`;
+}
+
 export function getStepLabel(step: GuideStep): string {
-  const target = cleanTargetText(step.targetText);
-  return target || `Step ${step.orderIndex + 1}`;
+  return getStepTitle(step);
 }
 
 export function getDefaultInstruction(

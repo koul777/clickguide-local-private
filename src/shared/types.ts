@@ -18,6 +18,7 @@ export type GuideStep = {
   eventType: EventType;
   url: string;
   pageTitle: string;
+  title?: string;
   targetText: string;
   x: number;
   y: number;
@@ -59,5 +60,5 @@ export type RecorderStatus = {
 };
 
 export type StepPatch = Partial<
-  Pick<GuideStep, "note" | "markerX" | "markerY" | "targetText">
+  Pick<GuideStep, "note" | "markerX" | "markerY" | "targetText" | "title">
 >;

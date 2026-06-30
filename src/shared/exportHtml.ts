@@ -1,5 +1,5 @@
 import { renderAnnotatedImageDataUrl } from "./markerCanvas";
-import { getDefaultInstruction } from "./stepText";
+import { getDefaultInstruction, getStepTitle } from "./stepText";
 import type { CaptureSession, GuideStep, ScreenshotAsset } from "./types";
 
 function escapeHtml(value: string): string {
@@ -9,19 +9,6 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
-}
-
-function safeFileName(value: string): string {
-  const cleaned = value
-    .trim()
-    .replace(/[\\/:*?"<>|]+/g, "-")
-    .replace(/\s+/g, "-")
-    .slice(0, 80);
-  return cleaned || "clickguide";
-}
-
-export function makeExportFileName(title: string): string {
-  return `${safeFileName(title)}.html`;
 }
 
 export async function generateGuideHtml(
@@ -50,22 +37,18 @@ export async function generateGuideHtml(
 
   const sections = renderedSteps
     .map(({ step, imageDataUrl, instruction }) => {
-      const title = step.targetText.trim()
-        ? `${step.orderIndex + 1}. ${escapeHtml(step.targetText)}`
-        : `${step.orderIndex + 1}단계`;
-      const meta = [step.pageTitle, step.url].filter(Boolean).map(escapeHtml).join(" · ");
+      const title = getStepTitle(step);
       const image = imageDataUrl
         ? `<img src="${imageDataUrl}" alt="${escapeHtml(title)}" />`
         : `<div class="missing">스크린샷을 찾을 수 없습니다.</div>`;
 
       return `<section class="step">
   <div class="step-header">
-    <h2>${title}</h2>
+    <h2>${escapeHtml(title)}</h2>
     <span>${step.orderIndex + 1} / ${steps.length}</span>
   </div>
   ${image}
   <p class="instruction">${escapeHtml(instruction)}</p>
-  <p class="meta">${meta}</p>
 </section>`;
     })
     .join("\n");
@@ -93,11 +76,12 @@ export async function generateGuideHtml(
     .step-header h2 { margin: 0; font-size: 18px; line-height: 1.35; }
     .step-header span { color: #52605a; font-size: 13px; white-space: nowrap; }
     img { display: block; width: 100%; height: auto; border: 1px solid #d8ded8; border-radius: 8px; background: #fff; }
-    .instruction { margin: 12px 0 6px; font-size: 16px; line-height: 1.6; }
-    .meta { margin: 0; color: #6b766f; font-size: 12px; line-height: 1.5; word-break: break-all; }
+    .instruction { margin: 12px 0 0; font-size: 16px; line-height: 1.6; white-space: pre-wrap; }
     .missing { padding: 32px; border: 1px solid #d8ded8; border-radius: 8px; background: #fff; color: #6b766f; }
     @media print {
-      main { max-width: none; padding: 16px; }
+      @page { size: A4 landscape; margin: 12mm; }
+      :root { background: #fff; }
+      main { max-width: none; padding: 0; }
       .step { page-break-inside: avoid; }
     }
   </style>
@@ -105,7 +89,6 @@ export async function generateGuideHtml(
 <body>
   <main>
     <header>
-      <h1>${escapeHtml(session.title)}</h1>
       <p class="summary">총 ${steps.length}개 단계 · ClickGuide Local에서 생성됨</p>
     </header>
     ${sections}
