@@ -9,6 +9,7 @@ release/
 # Packaged release artifacts
 *.zip
 *.pptx
+ClickGuideLocal_team_package*/
 
 # Environment and local config
 .env
