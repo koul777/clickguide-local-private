@@ -1,7 +1,8 @@
 {
   "name": "clickguide-local",
   "version": "0.1.1",
-  "private": true,
+  "description": "A local Chrome extension for recording browser clicks and exporting step-by-step PDF guides.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
