@@ -121,6 +121,11 @@ function Popup(): React.ReactElement {
   const canRecord = status.status === "idle";
   const hasActiveSession = status.status === "recording" || status.status === "paused";
   const pauseLabel = status.status === "paused" ? "다시 시작" : "일시정지";
+  const recordingHint = hasActiveSession
+    ? status.stepCount === 0
+      ? "기록된 단계가 0개입니다. 웹페이지를 클릭하면 단계와 스크린샷이 저장됩니다."
+      : "녹화 종료를 누르면 저장 중인 캡처를 마친 뒤 편집 화면이 새 탭으로 열립니다."
+    : "녹화 종료 후 편집 화면에서 PDF를 저장할 수 있습니다.";
 
   const subtitle = useMemo(() => {
     if (status.title && hasActiveSession) {
@@ -180,7 +185,7 @@ function Popup(): React.ReactElement {
             disabled={busy || !hasActiveSession}
             onClick={() => runAction({ type: MessageType.StopRecording })}
           >
-            녹화 종료
+            녹화 종료 및 편집
           </ActionButton>
         </div>
         <ActionButton
@@ -191,6 +196,16 @@ function Popup(): React.ReactElement {
           마지막 단계 삭제
         </ActionButton>
       </section>
+
+      <p
+        className={`mb-0 mt-3 rounded-md p-2 text-xs leading-5 ring-1 ${
+          hasActiveSession && status.stepCount === 0
+            ? "bg-amber-50 text-amber-900 ring-amber-200"
+            : "bg-white text-slate-600 ring-line"
+        }`}
+      >
+        {recordingHint}
+      </p>
 
       {error ? (
         <p className="mb-0 mt-3 rounded-md bg-red-50 p-2 text-xs leading-5 text-danger ring-1 ring-red-200">

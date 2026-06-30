@@ -126,6 +126,7 @@ async function stopRecording(): Promise<RecorderStatus> {
     return getStatus();
   }
 
+  await captureQueue.catch(() => undefined);
   await setSessionStatus(session.id, "completed");
   await updateActiveTabRecorderState(false);
   const editorUrl = chrome.runtime.getURL(`guide-editor.html?sessionId=${session.id}`);

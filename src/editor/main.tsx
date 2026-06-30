@@ -21,6 +21,7 @@ import {
 } from "../shared/markerCanvas";
 import { getDefaultInstruction, getStepLabel } from "../shared/stepText";
 import type { CaptureSession, GuideStep, ScreenshotAsset } from "../shared/types";
+import { AI_PROVIDERS, generateStepCopy, type AiProvider } from "./aiCopy";
 
 type StepCanvasProps = {
   step: GuideStep | undefined;
@@ -214,6 +215,8 @@ function downloadBlob(filename: string, blob: Blob): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+const AI_PROVIDER_ORDER: AiProvider[] = ["openai", "gemini", "claude"];
+
 function GuideEditor(): React.ReactElement {
   const [session, setSession] = useState<CaptureSession | undefined>();
   const [steps, setSteps] = useState<GuideStep[]>([]);
@@ -221,6 +224,14 @@ function GuideEditor(): React.ReactElement {
   const [selectedStepId, setSelectedStepId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [generatingCopy, setGeneratingCopy] = useState(false);
+  const [aiProvider, setAiProvider] = useState<AiProvider>("openai");
+  const [aiApiKeys, setAiApiKeys] = useState<Record<AiProvider, string>>({
+    openai: "",
+    gemini: "",
+    claude: ""
+  });
+  const [copyStatus, setCopyStatus] = useState("");
   const [error, setError] = useState("");
 
   const selectedStep = useMemo(
@@ -228,6 +239,8 @@ function GuideEditor(): React.ReactElement {
     [selectedStepId, steps]
   );
   const selectedScreenshot = selectedStep ? screenshots.get(selectedStep.id) : undefined;
+  const aiProviderConfig = AI_PROVIDERS[aiProvider];
+  const aiApiKey = aiApiKeys[aiProvider];
 
   const loadGuide = useCallback(async (preferredStepId?: string) => {
     setLoading(true);
@@ -280,6 +293,7 @@ function GuideEditor(): React.ReactElement {
     if (!selectedStep) {
       return;
     }
+    setCopyStatus("");
     updateStepLocal(selectedStep.id, { note: value });
     void patchStep(selectedStep.id, { note: value });
   };
@@ -288,8 +302,57 @@ function GuideEditor(): React.ReactElement {
     if (!selectedStep) {
       return;
     }
+    setCopyStatus("");
     updateStepLocal(selectedStep.id, { title: value });
     void patchStep(selectedStep.id, { title: value });
+  };
+
+  const handleAiProviderChange = (value: string): void => {
+    if (value === "openai" || value === "gemini" || value === "claude") {
+      setAiProvider(value);
+      setCopyStatus("");
+    }
+  };
+
+  const handleAiApiKeyChange = (value: string): void => {
+    setAiApiKeys((current) => ({
+      ...current,
+      [aiProvider]: value
+    }));
+    setCopyStatus("");
+  };
+
+  const handleGenerateCopy = async (): Promise<void> => {
+    if (!session || !selectedStep || !selectedScreenshot) {
+      return;
+    }
+
+    setGeneratingCopy(true);
+    setCopyStatus("");
+    setError("");
+    try {
+      const generated = await generateStepCopy({
+        provider: aiProvider,
+        apiKey: aiApiKey,
+        session,
+        step: selectedStep,
+        totalSteps: steps.length,
+        screenshot: selectedScreenshot
+      });
+      const savedStep = await patchStep(selectedStep.id, {
+        title: generated.title,
+        note: generated.note
+      });
+      updateStepLocal(selectedStep.id, {
+        title: savedStep?.title ?? generated.title,
+        note: savedStep?.note ?? generated.note
+      });
+      setCopyStatus("AI 문구를 적용했습니다.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "AI 문구 생성에 실패했습니다.");
+    } finally {
+      setGeneratingCopy(false);
+    }
   };
 
   const handleDeleteStep = async (stepId: string): Promise<void> => {
@@ -464,6 +527,65 @@ function GuideEditor(): React.ReactElement {
 
           {selectedStep ? (
             <div className="space-y-5 p-4">
+              <div className="rounded-md border border-line bg-panel p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="m-0 text-xs font-semibold text-slate-600">AI 문구 작성</h3>
+                    <p className="m-0 mt-1 truncate text-xs text-slate-500">
+                      {aiProviderConfig.label} · {aiProviderConfig.model}
+                    </p>
+                  </div>
+                  <Button
+                    intent="primary"
+                    disabled={generatingCopy || !aiApiKey.trim() || !selectedScreenshot}
+                    onClick={() => void handleGenerateCopy()}
+                  >
+                    {generatingCopy ? "작성 중" : "문구 작성"}
+                  </Button>
+                </div>
+
+                <div className="mt-3 grid gap-3">
+                  <label className="block">
+                    <span className="mb-2 block text-xs font-semibold text-slate-600">
+                      생성형 AI
+                    </span>
+                    <select
+                      value={aiProvider}
+                      onChange={(event) => handleAiProviderChange(event.target.value)}
+                      disabled={generatingCopy}
+                      className="focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-sm leading-6"
+                    >
+                      {AI_PROVIDER_ORDER.map((provider) => (
+                        <option key={provider} value={provider}>
+                          {AI_PROVIDERS[provider].label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="block">
+                    <span className="mb-2 block text-xs font-semibold text-slate-600">API 키</span>
+                    <input
+                      type="password"
+                      value={aiApiKey}
+                      onChange={(event) => handleAiApiKeyChange(event.target.value)}
+                      disabled={generatingCopy}
+                      autoComplete="off"
+                      placeholder={aiProviderConfig.apiKeyPlaceholder}
+                      className="focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-sm leading-6"
+                    />
+                  </label>
+                </div>
+
+                <p className="m-0 mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 ring-1 ring-amber-200">
+                  보안이 중요한 화면에서는 AI API를 연결하지 말고 제목과 설명을 직접 작성해 로컬로 진행하세요.
+                </p>
+
+                {copyStatus ? (
+                  <p className="m-0 mt-3 text-xs font-semibold text-brand">{copyStatus}</p>
+                ) : null}
+              </div>
+
               <label className="block">
                 <span className="mb-2 block text-xs font-semibold text-slate-600">단계 제목</span>
                 <input
