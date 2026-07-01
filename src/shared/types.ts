@@ -24,6 +24,10 @@ export type GuideStep = {
   y: number;
   markerX?: number;
   markerY?: number;
+  cropX?: number;
+  cropY?: number;
+  cropWidth?: number;
+  cropHeight?: number;
   viewportWidth: number;
   viewportHeight: number;
   screenshotId: string;
@@ -60,5 +64,16 @@ export type RecorderStatus = {
 };
 
 export type StepPatch = Partial<
-  Pick<GuideStep, "note" | "markerX" | "markerY" | "targetText" | "title">
+  Pick<
+    GuideStep,
+    | "note"
+    | "markerX"
+    | "markerY"
+    | "cropX"
+    | "cropY"
+    | "cropWidth"
+    | "cropHeight"
+    | "targetText"
+    | "title"
+  >
 >;

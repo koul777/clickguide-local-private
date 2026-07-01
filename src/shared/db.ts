@@ -344,6 +344,44 @@ export async function deleteStep(sessionId: string, stepId: string): Promise<voi
   await transactionDone(transaction);
 }
 
+export async function deleteSession(sessionId: string): Promise<void> {
+  const db = await openClickGuideDb();
+  const transaction = db.transaction(
+    [STORE.Sessions, STORE.Steps, STORE.Screenshots],
+    "readwrite"
+  );
+  const sessionStore = transaction.objectStore(STORE.Sessions);
+  const stepStore = transaction.objectStore(STORE.Steps);
+  const screenshotStore = transaction.objectStore(STORE.Screenshots);
+
+  const steps = await requestToPromise<GuideStep[]>(
+    stepStore.index("bySession").getAll(IDBKeyRange.only(sessionId))
+  );
+  const screenshots = await requestToPromise<ScreenshotAsset[]>(
+    screenshotStore.index("bySession").getAll(IDBKeyRange.only(sessionId))
+  );
+
+  steps.forEach((step) => stepStore.delete(step.id));
+  screenshots.forEach((screenshot) => screenshotStore.delete(screenshot.id));
+  sessionStore.delete(sessionId);
+
+  await transactionDone(transaction);
+}
+
+export async function deleteAllLocalData(): Promise<void> {
+  const db = await openClickGuideDb();
+  const transaction = db.transaction(
+    [STORE.Sessions, STORE.Steps, STORE.Screenshots],
+    "readwrite"
+  );
+
+  transaction.objectStore(STORE.Screenshots).clear();
+  transaction.objectStore(STORE.Steps).clear();
+  transaction.objectStore(STORE.Sessions).clear();
+
+  await transactionDone(transaction);
+}
+
 export async function moveStep(
   sessionId: string,
   stepId: string,

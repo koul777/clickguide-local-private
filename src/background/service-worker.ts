@@ -6,20 +6,114 @@ import {
   getStepCount,
   setSessionStatus
 } from "../shared/db";
-import { MessageType, type RuntimeMessage, type RuntimeResponse } from "../shared/messages";
+import { MessageType, type RuntimeResponse } from "../shared/messages";
 import type { RecordedClickPayload, RecorderStatus } from "../shared/types";
 
 const CAPTURE_INTERVAL_MS = 650;
+const MAX_URL_LENGTH = 4096;
+const MAX_PAGE_TITLE_LENGTH = 512;
+const MAX_TARGET_TEXT_LENGTH = 512;
 
 let captureQueue: Promise<void> = Promise.resolve();
 let lastCaptureAt = 0;
 
-function isRestrictedUrl(url: string): boolean {
-  return /^(chrome|edge|about|devtools|chrome-extension):\/\//i.test(url);
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRestrictedUrl(url: string): boolean {
+  return /^(chrome|edge|about|devtools|chrome-extension):/i.test(url);
+}
+
+function isBrowserInternalUrl(url: string): boolean {
+  return /^(chrome|edge|devtools|chrome-extension):/i.test(url);
+}
+
+function isRecordablePageUrl(url: string): boolean {
+  if (isRestrictedUrl(url)) {
+    return false;
+  }
+
+  try {
+    const { protocol } = new URL(url);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isValidClickPayload(value: unknown): value is RecordedClickPayload {
+  const payload = value as Partial<RecordedClickPayload>;
+
+  return (
+    (payload.eventType === "click" || payload.eventType === "pointerdown") &&
+    typeof payload.url === "string" &&
+    typeof payload.pageTitle === "string" &&
+    typeof payload.targetText === "string" &&
+    payload.url.length > 0 &&
+    payload.url.length <= MAX_URL_LENGTH &&
+    payload.pageTitle.length <= MAX_PAGE_TITLE_LENGTH &&
+    payload.targetText.length <= MAX_TARGET_TEXT_LENGTH &&
+    isFiniteNumber(payload.x) &&
+    isFiniteNumber(payload.y) &&
+    isFiniteNumber(payload.viewportWidth) &&
+    isFiniteNumber(payload.viewportHeight) &&
+    isFiniteNumber(payload.timestamp) &&
+    payload.viewportWidth > 0 &&
+    payload.viewportHeight > 0 &&
+    payload.x >= 0 &&
+    payload.y >= 0 &&
+    payload.x <= payload.viewportWidth &&
+    payload.y <= payload.viewportHeight
+  );
+}
+
+function isFromExtensionPage(sender: chrome.runtime.MessageSender): boolean {
+  return Boolean(sender.url?.startsWith(chrome.runtime.getURL("")));
+}
+
+function isFromContentScript(sender: chrome.runtime.MessageSender): boolean {
+  return (
+    typeof sender.tab?.id === "number" &&
+    !isFromExtensionPage(sender) &&
+    (sender.frameId === undefined || sender.frameId === 0)
+  );
+}
+
+function isFromAnyContentScriptFrame(sender: chrome.runtime.MessageSender): boolean {
+  return typeof sender.tab?.id === "number" && !isFromExtensionPage(sender);
+}
+
+async function isSenderActiveTab(sender: chrome.runtime.MessageSender): Promise<boolean> {
+  if (typeof sender.tab?.id !== "number" || typeof sender.tab.windowId !== "number") {
+    return false;
+  }
+
+  const tabs = await chrome.tabs.query({
+    active: true,
+    windowId: sender.tab.windowId
+  });
+  return tabs[0]?.id === sender.tab.id;
+}
+
+function isSameOriginAsSender(
+  payloadUrl: string,
+  sender: chrome.runtime.MessageSender
+): boolean {
+  if (!sender.url) {
+    return true;
+  }
+
+  try {
+    // Hash/router changes can make exact URL equality too brittle for SPA pages.
+    return new URL(payloadUrl).origin === new URL(sender.url).origin;
+  } catch {
+    return false;
+  }
 }
 
 async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
@@ -46,14 +140,70 @@ async function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {
   return tabs[0];
 }
 
-async function ensureRecorderInjected(tabId: number): Promise<void> {
+async function isRecordingTab(tabId: number): Promise<boolean> {
+  const status = await getStatus();
+  if (status.status !== "recording") {
+    return false;
+  }
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return Boolean(tab.active && tab.url && isRecordablePageUrl(tab.url));
+  } catch {
+    return false;
+  }
+}
+
+async function getInjectableFrameIds(tabId: number): Promise<number[]> {
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    const frameIds =
+      frames
+        ?.filter((frame) => !isBrowserInternalUrl(frame.url))
+        .map((frame) => frame.frameId) ?? [];
+
+    return frameIds.includes(0) ? frameIds : [0, ...frameIds];
+  } catch {
+    return [0];
+  }
+}
+
+async function injectRecorderIntoFrame(tabId: number, frameId: number): Promise<boolean> {
   try {
     await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
+      target: { tabId, frameIds: [frameId] },
       files: ["assets/recorder.js"]
     });
+    return true;
   } catch {
-    // Restricted browser pages cannot receive content scripts.
+    // Restricted or sandboxed frames cannot receive content scripts.
+    return false;
+  }
+}
+
+async function ensureRecorderInjected(tabId: number): Promise<void> {
+  const frameIds = await getInjectableFrameIds(tabId);
+  await Promise.all(frameIds.map((frameId) => injectRecorderIntoFrame(tabId, frameId)));
+}
+
+async function sendRecorderStateToFrame(
+  tabId: number,
+  frameId: number,
+  enabled: boolean,
+  status: RecorderStatus
+): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(
+      tabId,
+      {
+        type: MessageType.SetRecorderEnabled,
+        enabled,
+        status
+      },
+      { frameId }
+    );
+  } catch {
+    // The frame may not have a content script yet or may be restricted.
   }
 }
 
@@ -62,25 +212,41 @@ async function sendRecorderStateToTab(
   enabled: boolean,
   status: RecorderStatus
 ): Promise<void> {
-  try {
-    await chrome.tabs.sendMessage(tabId, {
-      type: MessageType.SetRecorderEnabled,
-      enabled,
-      status
-    });
-  } catch {
-    // The tab may not have a content script yet or may be a restricted page.
-  }
+  const frameIds = await getInjectableFrameIds(tabId);
+  await Promise.all(
+    frameIds.map((frameId) => sendRecorderStateToFrame(tabId, frameId, enabled, status))
+  );
 }
 
 async function updateActiveTabRecorderState(enabled: boolean): Promise<void> {
   const tab = await getActiveTab();
-  if (!tab?.id || !tab.url || isRestrictedUrl(tab.url)) {
+  if (!tab?.id || !tab.url || !isRecordablePageUrl(tab.url)) {
     return;
   }
 
   await ensureRecorderInjected(tab.id);
   await sendRecorderStateToTab(tab.id, enabled, await getStatus());
+}
+
+async function enableRecorderForNavigatedFrame(details: {
+  tabId: number;
+  frameId: number;
+  url: string;
+}): Promise<void> {
+  if (details.tabId < 0 || isBrowserInternalUrl(details.url)) {
+    return;
+  }
+
+  if (!(await isRecordingTab(details.tabId))) {
+    return;
+  }
+
+  const injected = await injectRecorderIntoFrame(details.tabId, details.frameId);
+  if (!injected) {
+    return;
+  }
+
+  await sendRecorderStateToFrame(details.tabId, details.frameId, true, await getStatus());
 }
 
 async function broadcastStatus(): Promise<RecorderStatus> {
@@ -175,7 +341,7 @@ function captureVisibleTab(windowId: number | undefined): Promise<string> {
 }
 
 async function recordClick(
-  payload: RecordedClickPayload,
+  payload: unknown,
   sender: chrome.runtime.MessageSender
 ): Promise<RecorderStatus> {
   const session = await getActiveSession();
@@ -183,7 +349,12 @@ async function recordClick(
     return getStatus();
   }
 
-  if (isRestrictedUrl(payload.url) || isRestrictedUrl(sender.url ?? "")) {
+  if (
+    !isValidClickPayload(payload) ||
+    !isRecordablePageUrl(payload.url) ||
+    !isSameOriginAsSender(payload.url, sender) ||
+    !(await isSenderActiveTab(sender))
+  ) {
     return getStatus();
   }
 
@@ -193,7 +364,7 @@ async function recordClick(
 }
 
 function enqueueClick(
-  payload: RecordedClickPayload,
+  payload: unknown,
   sender: chrome.runtime.MessageSender
 ): Promise<RecorderStatus> {
   let result: RecorderStatus = { status: "idle", stepCount: 0 };
@@ -206,10 +377,39 @@ function enqueueClick(
   return captureQueue.then(() => result);
 }
 
+type MessageLike = {
+  type?: string;
+  payload?: unknown;
+};
+
+function isAllowedMessageSender(
+  message: MessageLike,
+  sender: chrome.runtime.MessageSender
+): boolean {
+  switch (message.type) {
+    case MessageType.StartRecording:
+    case MessageType.TogglePause:
+    case MessageType.StopRecording:
+    case MessageType.DeleteLastStep:
+    case MessageType.GetStatus:
+      return isFromExtensionPage(sender);
+    case MessageType.ContentReady:
+      return isFromAnyContentScriptFrame(sender);
+    case MessageType.ClickRecorded:
+      return isFromContentScript(sender);
+    default:
+      return false;
+  }
+}
+
 async function handleMessage(
-  message: RuntimeMessage,
+  message: MessageLike,
   sender: chrome.runtime.MessageSender
 ): Promise<unknown> {
+  if (!isAllowedMessageSender(message, sender)) {
+    return getStatus();
+  }
+
   switch (message.type) {
     case MessageType.StartRecording:
       return startRecording();
@@ -223,8 +423,13 @@ async function handleMessage(
       return getStatus();
     case MessageType.ContentReady: {
       const status = await getStatus();
-      if (sender.tab?.id) {
-        await sendRecorderStateToTab(sender.tab.id, status.status === "recording", status);
+      if (sender.tab?.id && typeof sender.frameId === "number") {
+        await sendRecorderStateToFrame(
+          sender.tab.id,
+          sender.frameId,
+          status.status === "recording",
+          status
+        );
       }
       return status;
     }
@@ -235,7 +440,7 @@ async function handleMessage(
   }
 }
 
-chrome.runtime.onMessage.addListener((message: RuntimeMessage, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: MessageLike, sender, sendResponse) => {
   handleMessage(message, sender)
     .then((data) => {
       const response: RuntimeResponse = { ok: true, data };
@@ -256,4 +461,16 @@ chrome.tabs.onActivated.addListener(() => {
   void getStatus().then((status) => {
     void updateActiveTabRecorderState(status.status === "recording");
   });
+});
+
+chrome.webNavigation.onCommitted.addListener((details) => {
+  void enableRecorderForNavigatedFrame(details);
+});
+
+chrome.webNavigation.onDOMContentLoaded.addListener((details) => {
+  void enableRecorderForNavigatedFrame(details);
+});
+
+chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  void enableRecorderForNavigatedFrame(details);
 });

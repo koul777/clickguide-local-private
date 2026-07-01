@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client";
 import "../styles.css";
 import {
+  deleteAllLocalData,
+  deleteSession,
   deleteStep,
   getLatestSession,
   getScreenshotsForSteps,
@@ -11,6 +13,7 @@ import {
   patchStep,
   updateSessionTitle
 } from "../shared/db";
+import { AI_PROVIDER_OPTIONS, getAiProviderMeta, type AiProvider } from "./aiProviderMeta";
 import { generateGuidePdfBlob, makePdfFileName } from "../shared/exportPdf";
 import {
   canvasPointToStepPoint,
@@ -21,13 +24,120 @@ import {
 } from "../shared/markerCanvas";
 import { getDefaultInstruction, getStepLabel } from "../shared/stepText";
 import type { CaptureSession, GuideStep, ScreenshotAsset } from "../shared/types";
-import { AI_PROVIDERS, generateStepCopy, type AiProvider } from "./aiCopy";
+
+const AI_ENABLED_STORAGE_KEY = "clickguide.aiEnabled";
+const ALLOW_EXTERNAL_AI = import.meta.env.VITE_ALLOW_EXTERNAL_AI === "true";
+const emptyAiApiKeys: Record<AiProvider, string> = {
+  openai: "",
+  gemini: "",
+  claude: ""
+};
+const loadAiCopy = ALLOW_EXTERNAL_AI ? () => import("./aiCopy") : undefined;
+const AI_SECURITY_CONFIRM_MESSAGE = [
+  "AI 문구 작성 기능을 켜면 현재 단계의 스크린샷, 페이지 제목, URL, 클릭 대상 텍스트가 선택한 외부 AI API로 전송될 수 있습니다.",
+  "",
+  "회사 보안 정책에 위배될 수 있거나 개인정보, 고객정보, 영업비밀, 내부 시스템 정보가 포함된 화면이라면 AI 연결/API 키 입력/문구 작성을 진행하지 마세요.",
+  "",
+  "보안 정책상 문제가 없는 경우에만 계속하세요."
+].join("\n");
 
 type StepCanvasProps = {
   step: GuideStep | undefined;
   screenshot: ScreenshotAsset | undefined;
+  editMode: CanvasEditMode;
   onMarkerCommit: (stepId: string, point: MarkerPoint) => void;
+  onCropCommit: (stepId: string, rect: CropRect) => void;
 };
+
+type CanvasEditMode = "marker" | "crop";
+
+type CropRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function getStepCropRect(step: GuideStep | undefined): CropRect | undefined {
+  if (
+    !step ||
+    step.cropX === undefined ||
+    step.cropY === undefined ||
+    step.cropWidth === undefined ||
+    step.cropHeight === undefined ||
+    step.cropWidth <= 0 ||
+    step.cropHeight <= 0
+  ) {
+    return undefined;
+  }
+
+  return {
+    x: step.cropX,
+    y: step.cropY,
+    width: step.cropWidth,
+    height: step.cropHeight
+  };
+}
+
+function clampPointToStep(point: MarkerPoint, step: GuideStep): MarkerPoint {
+  return {
+    x: Math.max(0, Math.min(step.viewportWidth, point.x)),
+    y: Math.max(0, Math.min(step.viewportHeight, point.y))
+  };
+}
+
+function normalizeCropRect(start: MarkerPoint, end: MarkerPoint, step: GuideStep): CropRect {
+  const first = clampPointToStep(start, step);
+  const second = clampPointToStep(end, step);
+  const x = Math.min(first.x, second.x);
+  const y = Math.min(first.y, second.y);
+  const width = Math.abs(second.x - first.x);
+  const height = Math.abs(second.y - first.y);
+
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.round(width),
+    height: Math.round(height)
+  };
+}
+
+function drawCropOverlay(
+  context: CanvasRenderingContext2D,
+  step: GuideStep,
+  canvasWidth: number,
+  canvasHeight: number,
+  crop: CropRect | undefined
+): void {
+  if (!crop) {
+    return;
+  }
+
+  const scaleX = canvasWidth / Math.max(step.viewportWidth, 1);
+  const scaleY = canvasHeight / Math.max(step.viewportHeight, 1);
+  const x = crop.x * scaleX;
+  const y = crop.y * scaleY;
+  const width = crop.width * scaleX;
+  const height = crop.height * scaleY;
+
+  context.save();
+  context.fillStyle = "rgba(15, 23, 42, 0.42)";
+  context.beginPath();
+  context.rect(0, 0, canvasWidth, canvasHeight);
+  context.rect(x, y, width, height);
+  context.fill("evenodd");
+
+  context.strokeStyle = "#0f766e";
+  context.lineWidth = Math.max(3 * ((scaleX + scaleY) / 2), 3);
+  context.setLineDash([12, 8]);
+  context.strokeRect(x, y, width, height);
+
+  context.fillStyle = "#0f766e";
+  context.font = `700 ${Math.max(16 * ((scaleX + scaleY) / 2), 16)}px system-ui, sans-serif`;
+  context.textBaseline = "top";
+  context.fillText("PDF 출력 영역", x + 10, y + 10);
+  context.restore();
+}
 
 function Button({
   children,
@@ -61,15 +171,20 @@ function Button({
 function StepCanvas({
   step,
   screenshot,
-  onMarkerCommit
+  editMode,
+  onMarkerCommit,
+  onCropCommit
 }: StepCanvasProps): React.ReactElement {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const draggingRef = useRef(false);
+  const dragModeRef = useRef<CanvasEditMode | undefined>(undefined);
   const draftPointRef = useRef<MarkerPoint | null>(null);
+  const cropDragStartRef = useRef<MarkerPoint | null>(null);
+  const draftCropRef = useRef<CropRect | null>(null);
 
   const draw = useCallback(
-    (draftStep?: GuideStep) => {
+    (draftStep?: GuideStep, draftCrop?: CropRect) => {
       const canvas = canvasRef.current;
       const image = imageRef.current;
       const activeStep = draftStep ?? step;
@@ -87,6 +202,13 @@ function StepCanvas({
       context.clearRect(0, 0, canvas.width, canvas.height);
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
       drawMarkerOnContext(context, activeStep, canvas.width, canvas.height);
+      drawCropOverlay(
+        context,
+        activeStep,
+        canvas.width,
+        canvas.height,
+        draftCrop ?? getStepCropRect(activeStep)
+      );
     },
     [step]
   );
@@ -143,19 +265,56 @@ function StepCanvas({
     [draw, step]
   );
 
+  const updateDraftCrop = useCallback(
+    (clientX: number, clientY: number) => {
+      const canvas = canvasRef.current;
+      const start = cropDragStartRef.current;
+      if (!canvas || !step || !start) {
+        return;
+      }
+
+      const end = canvasPointToStepPoint(step, canvas, clientX, clientY);
+      const crop = normalizeCropRect(start, end, step);
+      draftCropRef.current = crop;
+      draw(step, crop);
+    },
+    [draw, step]
+  );
+
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
-    if (!canvas || !step || !isClientPointNearMarker(step, canvas, event.clientX, event.clientY)) {
+    if (!canvas || !step) {
+      return;
+    }
+
+    if (editMode === "crop") {
+      const point = canvasPointToStepPoint(step, canvas, event.clientX, event.clientY);
+      cropDragStartRef.current = point;
+      draftCropRef.current = {
+        x: point.x,
+        y: point.y,
+        width: 1,
+        height: 1
+      };
+      draggingRef.current = true;
+      dragModeRef.current = "crop";
+      canvas.setPointerCapture(event.pointerId);
+      draw(step, draftCropRef.current);
       return;
     }
 
     draggingRef.current = true;
+    dragModeRef.current = "marker";
     canvas.setPointerCapture(event.pointerId);
     updateDraftMarker(event.clientX, event.clientY);
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!draggingRef.current) {
+      return;
+    }
+    if (dragModeRef.current === "crop") {
+      updateDraftCrop(event.clientX, event.clientY);
       return;
     }
     updateDraftMarker(event.clientX, event.clientY);
@@ -172,8 +331,22 @@ function StepCanvas({
       canvas.releasePointerCapture(event.pointerId);
     }
 
+    if (dragModeRef.current === "crop") {
+      const crop = draftCropRef.current;
+      cropDragStartRef.current = null;
+      draftCropRef.current = null;
+      dragModeRef.current = undefined;
+      if (crop && crop.width >= 20 && crop.height >= 20) {
+        onCropCommit(step.id, crop);
+      } else {
+        draw();
+      }
+      return;
+    }
+
     const point = draftPointRef.current;
     draftPointRef.current = null;
+    dragModeRef.current = undefined;
     if (point) {
       onMarkerCommit(step.id, point);
     }
@@ -188,7 +361,9 @@ function StepCanvas({
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
-          className="max-h-full max-w-full cursor-grab rounded-md border border-line bg-white shadow-tool active:cursor-grabbing"
+          className={`max-h-full max-w-full rounded-md border border-line bg-white shadow-tool ${
+            editMode === "crop" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"
+          }`}
         />
       ) : (
         <div className="rounded-lg border border-dashed border-line bg-white px-6 py-8 text-center text-sm text-slate-500">
@@ -215,8 +390,6 @@ function downloadBlob(filename: string, blob: Blob): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-const AI_PROVIDER_ORDER: AiProvider[] = ["openai", "gemini", "claude"];
-
 function GuideEditor(): React.ReactElement {
   const [session, setSession] = useState<CaptureSession | undefined>();
   const [steps, setSteps] = useState<GuideStep[]>([]);
@@ -224,23 +397,22 @@ function GuideEditor(): React.ReactElement {
   const [selectedStepId, setSelectedStepId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
-  const [generatingCopy, setGeneratingCopy] = useState(false);
-  const [aiProvider, setAiProvider] = useState<AiProvider>("openai");
-  const [aiApiKeys, setAiApiKeys] = useState<Record<AiProvider, string>>({
-    openai: "",
-    gemini: "",
-    claude: ""
-  });
-  const [copyStatus, setCopyStatus] = useState("");
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiProvider, setAiProvider] = useState<AiProvider>("openai");
+  const [aiApiKeys, setAiApiKeys] = useState<Record<AiProvider, string>>(emptyAiApiKeys);
+  const [copyStatus, setCopyStatus] = useState("");
+  const [copyGenerating, setCopyGenerating] = useState(false);
+  const [canvasEditMode, setCanvasEditMode] = useState<CanvasEditMode>("marker");
 
   const selectedStep = useMemo(
     () => steps.find((step) => step.id === selectedStepId) ?? steps[0],
     [selectedStepId, steps]
   );
   const selectedScreenshot = selectedStep ? screenshots.get(selectedStep.id) : undefined;
-  const aiProviderConfig = AI_PROVIDERS[aiProvider];
-  const aiApiKey = aiApiKeys[aiProvider];
+  const selectedProviderMeta = getAiProviderMeta(aiProvider);
+  const selectedCrop = getStepCropRect(selectedStep);
 
   const loadGuide = useCallback(async (preferredStepId?: string) => {
     setLoading(true);
@@ -275,11 +447,98 @@ function GuideEditor(): React.ReactElement {
     void loadGuide();
   }, [loadGuide]);
 
+  useEffect(() => {
+    if (!ALLOW_EXTERNAL_AI) {
+      setAiEnabled(false);
+      window.localStorage.removeItem(AI_ENABLED_STORAGE_KEY);
+      return;
+    }
+
+    const saved = window.localStorage.getItem(AI_ENABLED_STORAGE_KEY);
+    setAiEnabled(saved === "true");
+  }, []);
+
   const updateStepLocal = useCallback((stepId: string, patch: Partial<GuideStep>) => {
     setSteps((current) =>
       current.map((step) => (step.id === stepId ? { ...step, ...patch } : step))
     );
   }, []);
+
+  const handleAiEnabledChange = (enabled: boolean): void => {
+    if (!ALLOW_EXTERNAL_AI) {
+      setAiEnabled(false);
+      window.localStorage.removeItem(AI_ENABLED_STORAGE_KEY);
+      return;
+    }
+
+    if (enabled) {
+      const confirmed = window.confirm(AI_SECURITY_CONFIRM_MESSAGE);
+      if (!confirmed) {
+        setAiEnabled(false);
+        window.localStorage.setItem(AI_ENABLED_STORAGE_KEY, "false");
+        setCopyStatus("AI 기능을 켜지 않았습니다.");
+        return;
+      }
+    }
+
+    setAiEnabled(enabled);
+    window.localStorage.setItem(AI_ENABLED_STORAGE_KEY, String(enabled));
+    setCopyStatus("");
+    if (!enabled) {
+      setAiApiKeys({ ...emptyAiApiKeys });
+    }
+  };
+
+  const handleAiApiKeyChange = (provider: AiProvider, value: string): void => {
+    setAiApiKeys((current) => ({
+      ...current,
+      [provider]: value
+    }));
+  };
+
+  const handleGenerateCopy = async (): Promise<void> => {
+    if (!ALLOW_EXTERNAL_AI || !aiEnabled || !loadAiCopy) {
+      setError("AI 기능이 꺼져 있습니다.");
+      return;
+    }
+
+    if (!selectedStep) {
+      return;
+    }
+
+    const apiKey = aiApiKeys[aiProvider].trim();
+    if (!apiKey) {
+      setError("AI API 키를 입력하세요.");
+      return;
+    }
+
+    setCopyGenerating(true);
+    setCopyStatus("AI 문구를 작성하는 중입니다.");
+    setError("");
+    try {
+      const { generateStepCopy } = await loadAiCopy();
+      const copy = await generateStepCopy({
+        provider: aiProvider,
+        apiKey,
+        step: selectedStep,
+        screenshot: selectedScreenshot
+      });
+      updateStepLocal(selectedStep.id, {
+        title: copy.title,
+        note: copy.note
+      });
+      await patchStep(selectedStep.id, {
+        title: copy.title,
+        note: copy.note
+      });
+      setCopyStatus("AI 문구를 적용했습니다.");
+    } catch (err) {
+      setCopyStatus("");
+      setError(err instanceof Error ? err.message : "AI 문구 작성에 실패했습니다.");
+    } finally {
+      setCopyGenerating(false);
+    }
+  };
 
   const handleTitleChange = async (value: string): Promise<void> => {
     if (!session) {
@@ -293,7 +552,6 @@ function GuideEditor(): React.ReactElement {
     if (!selectedStep) {
       return;
     }
-    setCopyStatus("");
     updateStepLocal(selectedStep.id, { note: value });
     void patchStep(selectedStep.id, { note: value });
   };
@@ -302,57 +560,8 @@ function GuideEditor(): React.ReactElement {
     if (!selectedStep) {
       return;
     }
-    setCopyStatus("");
     updateStepLocal(selectedStep.id, { title: value });
     void patchStep(selectedStep.id, { title: value });
-  };
-
-  const handleAiProviderChange = (value: string): void => {
-    if (value === "openai" || value === "gemini" || value === "claude") {
-      setAiProvider(value);
-      setCopyStatus("");
-    }
-  };
-
-  const handleAiApiKeyChange = (value: string): void => {
-    setAiApiKeys((current) => ({
-      ...current,
-      [aiProvider]: value
-    }));
-    setCopyStatus("");
-  };
-
-  const handleGenerateCopy = async (): Promise<void> => {
-    if (!session || !selectedStep || !selectedScreenshot) {
-      return;
-    }
-
-    setGeneratingCopy(true);
-    setCopyStatus("");
-    setError("");
-    try {
-      const generated = await generateStepCopy({
-        provider: aiProvider,
-        apiKey: aiApiKey,
-        session,
-        step: selectedStep,
-        totalSteps: steps.length,
-        screenshot: selectedScreenshot
-      });
-      const savedStep = await patchStep(selectedStep.id, {
-        title: generated.title,
-        note: generated.note
-      });
-      updateStepLocal(selectedStep.id, {
-        title: savedStep?.title ?? generated.title,
-        note: savedStep?.note ?? generated.note
-      });
-      setCopyStatus("AI 문구를 적용했습니다.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "AI 문구 생성에 실패했습니다.");
-    } finally {
-      setGeneratingCopy(false);
-    }
   };
 
   const handleDeleteStep = async (stepId: string): Promise<void> => {
@@ -361,6 +570,55 @@ function GuideEditor(): React.ReactElement {
     }
     await deleteStep(session.id, stepId);
     await loadGuide(selectedStepId === stepId ? undefined : selectedStepId);
+  };
+
+  const handleDeleteCurrentGuide = async (): Promise<void> => {
+    if (!session) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "현재 가이드와 연결된 단계, 스크린샷을 모두 삭제합니다. 계속할까요?"
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDeleting(true);
+    setError("");
+    try {
+      await deleteSession(session.id);
+      window.history.replaceState(null, "", window.location.pathname);
+      await loadGuide();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "현재 가이드를 삭제하지 못했습니다.");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleDeleteAllLocalData = async (): Promise<void> => {
+    const confirmed = window.confirm(
+      "모든 로컬 가이드, 단계, 스크린샷을 삭제합니다. 이 작업은 되돌릴 수 없습니다."
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDeleting(true);
+    setError("");
+    try {
+      await deleteAllLocalData();
+      window.history.replaceState(null, "", window.location.pathname);
+      setSession(undefined);
+      setSteps([]);
+      setScreenshots(new Map());
+      setSelectedStepId(undefined);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "로컬 기록을 삭제하지 못했습니다.");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const handleMoveStep = async (stepId: string, direction: "up" | "down"): Promise<void> => {
@@ -374,6 +632,32 @@ function GuideEditor(): React.ReactElement {
   const handleMarkerCommit = async (stepId: string, point: MarkerPoint): Promise<void> => {
     updateStepLocal(stepId, { markerX: point.x, markerY: point.y });
     await patchStep(stepId, { markerX: point.x, markerY: point.y });
+  };
+
+  const handleCropCommit = async (stepId: string, crop: CropRect): Promise<void> => {
+    const patch = {
+      cropX: crop.x,
+      cropY: crop.y,
+      cropWidth: crop.width,
+      cropHeight: crop.height
+    };
+    updateStepLocal(stepId, patch);
+    await patchStep(stepId, patch);
+  };
+
+  const handleClearCrop = async (): Promise<void> => {
+    if (!selectedStep) {
+      return;
+    }
+
+    const patch = {
+      cropX: undefined,
+      cropY: undefined,
+      cropWidth: undefined,
+      cropHeight: undefined
+    };
+    updateStepLocal(selectedStep.id, patch);
+    await patchStep(selectedStep.id, patch);
   };
 
   const handleExport = async (): Promise<void> => {
@@ -516,7 +800,9 @@ function GuideEditor(): React.ReactElement {
           <StepCanvas
             step={selectedStep}
             screenshot={selectedScreenshot}
+            editMode={canvasEditMode}
             onMarkerCommit={(stepId, point) => void handleMarkerCommit(stepId, point)}
+            onCropCommit={(stepId, crop) => void handleCropCommit(stepId, crop)}
           />
         </section>
 
@@ -527,65 +813,6 @@ function GuideEditor(): React.ReactElement {
 
           {selectedStep ? (
             <div className="space-y-5 p-4">
-              <div className="rounded-md border border-line bg-panel p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <h3 className="m-0 text-xs font-semibold text-slate-600">AI 문구 작성</h3>
-                    <p className="m-0 mt-1 truncate text-xs text-slate-500">
-                      {aiProviderConfig.label} · {aiProviderConfig.model}
-                    </p>
-                  </div>
-                  <Button
-                    intent="primary"
-                    disabled={generatingCopy || !aiApiKey.trim() || !selectedScreenshot}
-                    onClick={() => void handleGenerateCopy()}
-                  >
-                    {generatingCopy ? "작성 중" : "문구 작성"}
-                  </Button>
-                </div>
-
-                <div className="mt-3 grid gap-3">
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-semibold text-slate-600">
-                      생성형 AI
-                    </span>
-                    <select
-                      value={aiProvider}
-                      onChange={(event) => handleAiProviderChange(event.target.value)}
-                      disabled={generatingCopy}
-                      className="focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-sm leading-6"
-                    >
-                      {AI_PROVIDER_ORDER.map((provider) => (
-                        <option key={provider} value={provider}>
-                          {AI_PROVIDERS[provider].label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-semibold text-slate-600">API 키</span>
-                    <input
-                      type="password"
-                      value={aiApiKey}
-                      onChange={(event) => handleAiApiKeyChange(event.target.value)}
-                      disabled={generatingCopy}
-                      autoComplete="off"
-                      placeholder={aiProviderConfig.apiKeyPlaceholder}
-                      className="focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-sm leading-6"
-                    />
-                  </label>
-                </div>
-
-                <p className="m-0 mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 ring-1 ring-amber-200">
-                  보안이 중요한 화면에서는 AI API를 연결하지 말고 제목과 설명을 직접 작성해 로컬로 진행하세요.
-                </p>
-
-                {copyStatus ? (
-                  <p className="m-0 mt-3 text-xs font-semibold text-brand">{copyStatus}</p>
-                ) : null}
-              </div>
-
               <label className="block">
                 <span className="mb-2 block text-xs font-semibold text-slate-600">단계 제목</span>
                 <input
@@ -605,6 +832,129 @@ function GuideEditor(): React.ReactElement {
                   className="focus-ring min-h-36 w-full resize-y rounded-md border border-line bg-white px-3 py-2 text-sm leading-6"
                 />
               </label>
+
+              <div className="rounded-lg border border-line bg-panel p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="m-0 text-xs font-semibold text-slate-700">AI 문구 작성</h3>
+                  {ALLOW_EXTERNAL_AI ? (
+                    <label className="flex shrink-0 items-center gap-2 text-xs font-semibold text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={aiEnabled}
+                        onChange={(event) => handleAiEnabledChange(event.target.checked)}
+                        className="h-4 w-4 accent-brand"
+                      />
+                      AI 사용
+                    </label>
+                  ) : null}
+                </div>
+
+                {!ALLOW_EXTERNAL_AI ? (
+                  <p className="mb-0 mt-3 text-xs leading-5 text-slate-600">
+                    관리자 정책으로 AI 기능이 비활성화되어 있습니다. 제목과 설명은 로컬에서
+                    직접 작성할 수 있습니다.
+                  </p>
+                ) : aiEnabled ? (
+                  <div className="mt-3 space-y-3">
+                    <p className="m-0 text-xs font-semibold text-slate-700">
+                      {selectedProviderMeta.label} · {selectedProviderMeta.model}
+                    </p>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-semibold text-slate-600">
+                        Provider
+                      </span>
+                      <select
+                        value={aiProvider}
+                        onChange={(event) => {
+                          setAiProvider(event.target.value as AiProvider);
+                          setCopyStatus("");
+                        }}
+                        className="focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-sm"
+                      >
+                        {AI_PROVIDER_OPTIONS.map((provider) => (
+                          <option key={provider.id} value={provider.id}>
+                            {provider.label} · {provider.model}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-semibold text-slate-600">
+                        API 키
+                      </span>
+                      <input
+                        type="password"
+                        value={aiApiKeys[aiProvider]}
+                        onChange={(event) =>
+                          handleAiApiKeyChange(aiProvider, event.target.value)
+                        }
+                        placeholder={selectedProviderMeta.apiKeyPlaceholder}
+                        className="focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-sm"
+                      />
+                    </label>
+                    <p className="m-0 rounded-md bg-amber-50 p-2 text-xs leading-5 text-warn ring-1 ring-amber-200">
+                      AI를 켜면 현재 단계의 스크린샷, 페이지 제목, URL, 클릭 대상 텍스트가
+                      선택한 외부 AI API로 전송될 수 있습니다.
+                    </p>
+                    <Button
+                      intent="primary"
+                      disabled={copyGenerating}
+                      onClick={() => void handleGenerateCopy()}
+                    >
+                      {copyGenerating ? "작성 중" : "문구 작성"}
+                    </Button>
+                    {copyStatus ? (
+                      <p className="m-0 text-xs leading-5 text-slate-600">{copyStatus}</p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="mt-3 space-y-1">
+                    <p className="m-0 text-xs font-semibold text-slate-700">
+                      꺼짐 · 로컬 직접 작성 모드
+                    </p>
+                    <p className="m-0 text-xs leading-5 text-slate-600">
+                      AI 기능이 꺼져 있습니다. 제목과 설명을 직접 작성하면 모든 작업이
+                      로컬에서 진행됩니다.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-line bg-panel p-3">
+                <h3 className="m-0 text-xs font-semibold text-slate-700">PDF 화면 자르기</h3>
+                <p className="mb-3 mt-2 text-xs leading-5 text-slate-600">
+                  출력에 남길 화면 영역만 미리보기에서 드래그하세요. PDF에서는 선택한
+                  영역만 다른 페이지와 같은 규격 안에 맞춰 들어갑니다.
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    intent={canvasEditMode === "marker" ? "primary" : "neutral"}
+                    onClick={() => setCanvasEditMode("marker")}
+                  >
+                    마커 이동
+                  </Button>
+                  <Button
+                    intent={canvasEditMode === "crop" ? "primary" : "neutral"}
+                    onClick={() => setCanvasEditMode("crop")}
+                  >
+                    출력 영역 자르기
+                  </Button>
+                </div>
+                <div className="mt-3 flex items-center justify-between gap-2">
+                  <p className="m-0 text-xs leading-5 text-slate-600">
+                    {selectedCrop
+                      ? `선택됨 · ${selectedCrop.width} x ${selectedCrop.height}`
+                      : "선택된 출력 영역 없음"}
+                  </p>
+                  <Button
+                    intent="danger"
+                    disabled={!selectedCrop}
+                    onClick={() => void handleClearCrop()}
+                  >
+                    해제
+                  </Button>
+                </div>
+              </div>
 
               <div>
                 <h3 className="m-0 mb-2 text-xs font-semibold text-slate-600">클릭 대상</h3>
@@ -633,9 +983,56 @@ function GuideEditor(): React.ReactElement {
                   </div>
                 </dl>
               </div>
+
+              <div className="rounded-lg border border-line bg-panel p-3">
+                <h3 className="m-0 text-xs font-semibold text-slate-700">로컬 데이터</h3>
+                <p className="mb-3 mt-2 text-xs leading-5 text-slate-600">
+                  캡처된 스크린샷과 단계 데이터는 Chrome IndexedDB에 저장됩니다.
+                </p>
+                <div className="grid gap-2">
+                  <Button
+                    intent="danger"
+                    disabled={deleting}
+                    onClick={() => void handleDeleteCurrentGuide()}
+                  >
+                    현재 가이드 삭제
+                  </Button>
+                  <Button
+                    intent="danger"
+                    disabled={deleting}
+                    onClick={() => void handleDeleteAllLocalData()}
+                  >
+                    모든 로컬 기록 삭제
+                  </Button>
+                </div>
+              </div>
             </div>
           ) : (
-            <p className="p-4 text-sm text-slate-500">단계를 선택하세요.</p>
+            <div className="space-y-5 p-4">
+              <p className="m-0 text-sm text-slate-500">단계를 선택하세요.</p>
+              <div className="rounded-lg border border-line bg-panel p-3">
+                <h3 className="m-0 text-xs font-semibold text-slate-700">로컬 데이터</h3>
+                <p className="mb-3 mt-2 text-xs leading-5 text-slate-600">
+                  캡처된 스크린샷과 단계 데이터는 Chrome IndexedDB에 저장됩니다.
+                </p>
+                <div className="grid gap-2">
+                  <Button
+                    intent="danger"
+                    disabled={deleting}
+                    onClick={() => void handleDeleteCurrentGuide()}
+                  >
+                    현재 가이드 삭제
+                  </Button>
+                  <Button
+                    intent="danger"
+                    disabled={deleting}
+                    onClick={() => void handleDeleteAllLocalData()}
+                  >
+                    모든 로컬 기록 삭제
+                  </Button>
+                </div>
+              </div>
+            </div>
           )}
         </aside>
       </div>

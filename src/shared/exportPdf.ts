@@ -8,6 +8,13 @@ type PdfPageImage = {
   height: number;
 };
 
+type SourceRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 const PDF_WIDTH_PT = 841.89;
 const PDF_HEIGHT_PT = 595.28;
 const PAGE_WIDTH = 1754;
@@ -166,6 +173,89 @@ function drawMissingScreenshot(
   return height;
 }
 
+function getStepCropSourceRect(image: HTMLImageElement, step: GuideStep): SourceRect {
+  if (
+    step.cropX === undefined ||
+    step.cropY === undefined ||
+    step.cropWidth === undefined ||
+    step.cropHeight === undefined ||
+    step.cropWidth <= 0 ||
+    step.cropHeight <= 0
+  ) {
+    return {
+      x: 0,
+      y: 0,
+      width: image.naturalWidth,
+      height: image.naturalHeight
+    };
+  }
+
+  const scaleX = image.naturalWidth / Math.max(step.viewportWidth, 1);
+  const scaleY = image.naturalHeight / Math.max(step.viewportHeight, 1);
+  const x = Math.max(0, Math.min(image.naturalWidth - 1, Math.round(step.cropX * scaleX)));
+  const y = Math.max(0, Math.min(image.naturalHeight - 1, Math.round(step.cropY * scaleY)));
+  const right = Math.max(
+    x + 1,
+    Math.min(image.naturalWidth, Math.round((step.cropX + step.cropWidth) * scaleX))
+  );
+  const bottom = Math.max(
+    y + 1,
+    Math.min(image.naturalHeight, Math.round((step.cropY + step.cropHeight) * scaleY))
+  );
+
+  return {
+    x,
+    y,
+    width: right - x,
+    height: bottom - y
+  };
+}
+
+function getMarkerStepForCrop(step: GuideStep): GuideStep {
+  if (
+    step.cropX === undefined ||
+    step.cropY === undefined ||
+    step.cropWidth === undefined ||
+    step.cropHeight === undefined ||
+    step.cropWidth <= 0 ||
+    step.cropHeight <= 0
+  ) {
+    return step;
+  }
+
+  return {
+    ...step,
+    x: step.x - step.cropX,
+    y: step.y - step.cropY,
+    markerX: (step.markerX ?? step.x) - step.cropX,
+    markerY: (step.markerY ?? step.y) - step.cropY,
+    viewportWidth: step.cropWidth,
+    viewportHeight: step.cropHeight
+  };
+}
+
+function shouldDrawMarker(step: GuideStep): boolean {
+  if (
+    step.cropX === undefined ||
+    step.cropY === undefined ||
+    step.cropWidth === undefined ||
+    step.cropHeight === undefined ||
+    step.cropWidth <= 0 ||
+    step.cropHeight <= 0
+  ) {
+    return true;
+  }
+
+  const markerX = step.markerX ?? step.x;
+  const markerY = step.markerY ?? step.y;
+  return (
+    markerX >= step.cropX &&
+    markerX <= step.cropX + step.cropWidth &&
+    markerY >= step.cropY &&
+    markerY <= step.cropY + step.cropHeight
+  );
+}
+
 function drawScreenshot(
   context: CanvasRenderingContext2D,
   image: HTMLImageElement,
@@ -173,24 +263,48 @@ function drawScreenshot(
   y: number,
   maxHeight: number
 ): number {
-  const scale = Math.min(CONTENT_WIDTH / image.naturalWidth, maxHeight / image.naturalHeight);
-  const width = Math.round(image.naturalWidth * scale);
-  const height = Math.round(image.naturalHeight * scale);
-  const x = Math.round((PAGE_WIDTH - width) / 2);
+  const source = getStepCropSourceRect(image, step);
+  const hasCrop = source.width !== image.naturalWidth || source.height !== image.naturalHeight;
+  const frameHeight = hasCrop ? maxHeight : undefined;
+  const scale = Math.min(CONTENT_WIDTH / source.width, maxHeight / source.height);
+  const width = Math.round(source.width * scale);
+  const height = Math.round(source.height * scale);
+  const frameY = y;
+  const frameX = MARGIN;
+  const frameWidth = CONTENT_WIDTH;
+  const actualFrameHeight = frameHeight ?? height;
+  const x = Math.round(frameX + (frameWidth - width) / 2);
+  const imageY = Math.round(frameY + (actualFrameHeight - height) / 2);
+  const markerStep = getMarkerStepForCrop(step);
 
   context.fillStyle = "#ffffff";
-  context.fillRect(x, y, width, height);
-  context.drawImage(image, x, y, width, height);
-  context.save();
-  context.translate(x, y);
-  drawMarkerOnContext(context, step, width, height);
-  context.restore();
+  context.fillRect(frameX, frameY, frameWidth, actualFrameHeight);
+  context.drawImage(
+    image,
+    source.x,
+    source.y,
+    source.width,
+    source.height,
+    x,
+    imageY,
+    width,
+    height
+  );
+  if (shouldDrawMarker(step)) {
+    context.save();
+    context.beginPath();
+    context.rect(x, imageY, width, height);
+    context.clip();
+    context.translate(x, imageY);
+    drawMarkerOnContext(context, markerStep, width, height);
+    context.restore();
+  }
 
   context.strokeStyle = LINE_COLOR;
   context.lineWidth = 2;
-  context.strokeRect(x, y, width, height);
+  context.strokeRect(frameX, frameY, frameWidth, actualFrameHeight);
 
-  return height;
+  return actualFrameHeight;
 }
 
 async function canvasToJpegPage(canvas: HTMLCanvasElement): Promise<PdfPageImage> {

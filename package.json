@@ -11,10 +11,10 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
-    "vite": "^7.0.0",
-    "typescript": "^5.8.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.3.6"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.326",
