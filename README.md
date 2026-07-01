@@ -133,7 +133,7 @@ Chrome 오른쪽 위 퍼즐 모양 아이콘을 누릅니다.
 
 2026년 7월 1일 ERP 호환성과 AI 사용 설정을 보강했습니다.
 
-- 영림원 ERP처럼 iframe 안에서 아이콘형 버튼을 쓰는 화면의 클릭 기록을 보강했습니다.
+- iframe 안에서 아이콘형 버튼을 쓰는 ERP/업무 화면의 클릭 기록을 보강했습니다.
 - ERP가 화면 전환 중 `about:blank`, sandbox, 동적 iframe을 만들더라도 recorder가 들어가도록 `content_scripts`, `all_frames`, `match_about_blank` 설정을 다시 적용했습니다.
 - iframe 내부 클릭 메시지가 `null` origin으로 들어오는 ERP 화면도 실제 하위 frame에서 온 메시지이면 기록할 수 있게 처리했습니다.
 - 녹화 중 새로 로드되는 frame에도 recorder 상태가 전달되도록 `webNavigation` 기반 재주입을 보강했습니다.
@@ -172,7 +172,7 @@ Chrome이 보안상 막는 페이지는 확장 프로그램이 기록할 수 없
 
 Excel, 한글, 설치형 ERP, Windows 프로그램 화면은 Chrome 확장 프로그램 권한 밖이라 클릭 감지와 자동 캡처가 되지 않습니다. 이런 화면까지 자동 기록하려면 별도의 Windows 데스크톱 캡처 프로그램이나 로컬 보조 프로그램이 필요합니다.
 
-### 영림원 ERP 같은 화면의 아이콘 버튼이 기록되지 않습니다
+### ERP 화면의 아이콘 버튼이 기록되지 않습니다
 
 최신 버전은 이미지형 버튼, 아이콘형 버튼, iframe 안의 ERP 버튼 기록을 보강했습니다.
 
