@@ -113,13 +113,11 @@ Chrome 오른쪽 위 퍼즐 모양 아이콘을 누릅니다.
 - AI 문구 작성 사용 여부 선택
 - PDF 파일 저장
 
-<img src="docs/images/usage-03-editor.jpg" alt="ClickGuide Local 편집 화면에서 단계와 설명을 확인하는 화면" width="900">
-
-AI 문구 작성과 PDF 화면 자르기 영역은 편집 화면 오른쪽에서 사용할 수 있습니다.
+아래 화면처럼 오른쪽 패널에서 AI 문구 작성과 PDF 화면 자르기 영역을 사용할 수 있습니다.
 
 <img src="docs/images/usage-04-ai-copy.jpg" alt="ClickGuide Local 편집 화면에서 AI 문구 작성과 PDF 화면 자르기 영역을 보여주는 화면" width="900">
 
-참고: 위 화면은 예시 이미지입니다. 최신 버전에서는 오른쪽 위 내보내기 버튼이 `PDF 저장`으로 표시됩니다.
+참고: 위 화면은 예시 이미지입니다. 최신 버전에서는 오른쪽 위 버튼이 `PDF 저장`으로 표시됩니다.
 
 ## 업데이트 방법
 
